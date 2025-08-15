@@ -1,0 +1,5 @@
+<resources>
+    <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+        <!-- 这里放你的主题属性 -->
+    </style>
+</resources>
