@@ -20,8 +20,6 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
 import android.webkit.CookieManager;
 
 public class MainActivity extends AppCompatActivity {
@@ -35,7 +33,6 @@ public class MainActivity extends AppCompatActivity {
     private WebChromeClient.CustomViewCallback customViewCallback;
     private WebChromeClient webChromeClient;
     private String url = "https://moontv-518.pages.dev/";
-    private boolean isPageLoadFailed = false; // 跟踪页面加载失败状态
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,7 +51,7 @@ public class MainActivity extends AppCompatActivity {
         swipeRefreshLayout.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
-        swipeRefreshLayout.setEnabled(true); // 始终启用下拉刷新
+        swipeRefreshLayout.setEnabled(true); // 启用下拉刷新
 
         // 创建 WebView
         webView = new WebView(this);
@@ -107,45 +104,22 @@ public class MainActivity extends AppCompatActivity {
         // 设置 WebViewClient 控制 loading 显示隐藏
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                Log.d("WebView", "Page started loading: " + url);
+            public void onPageStarted(WebView view, String pageUrl, android.graphics.Bitmap favicon) {
+                Log.d("WebView", "Page started loading: " + pageUrl);
+                url = pageUrl; // 更新当前 URL
                 loadingLayout.setVisibility(View.VISIBLE);
                 progressBar.setVisibility(View.VISIBLE); // 显示 ProgressBar
                 swipeRefreshLayout.setRefreshing(true);
-                isPageLoadFailed = false; // 重置加载失败状态
                 loadingLayout.bringToFront(); // 确保 loadingLayout 在前
             }
 
             @Override
-            public void onPageFinished(WebView view, String url) {
-                Log.d("WebView", "Page finished loading: " + url);
+            public void onPageFinished(WebView view, String pageUrl) {
+                Log.d("WebView", "Page finished loading: " + pageUrl);
+                url = pageUrl; // 更新当前 URL
                 loadingLayout.setVisibility(View.GONE);
                 progressBar.setVisibility(View.GONE);
                 swipeRefreshLayout.setRefreshing(false);
-                rootLayout.invalidate(); // 强制刷新布局
-            }
-
-            // 针对 API < 23
-            @Override
-            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                Log.d("WebView", "Error (API < 23): " + errorCode + ", " + description + ", URL: " + failingUrl);
-                loadingLayout.setVisibility(View.GONE); // 隐藏 loadingLayout
-                progressBar.setVisibility(View.GONE); // 隐藏 ProgressBar
-                swipeRefreshLayout.setRefreshing(false);
-                isPageLoadFailed = true; // 标记页面加载失败
-                view.loadUrl("file:///android_asset/error.html"); // 加载静态错误页面
-                rootLayout.invalidate(); // 强制刷新布局
-            }
-
-            // 针对 API ≥ 23
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                Log.d("WebView", "Error (API >= 23): " + error.getDescription() + ", URL: " + request.getUrl());
-                loadingLayout.setVisibility(View.GONE); // 隐藏 loadingLayout
-                progressBar.setVisibility(View.GONE); // 隐藏 ProgressBar
-                swipeRefreshLayout.setRefreshing(false);
-                isPageLoadFailed = true; // 标记页面加载失败
-                view.loadUrl("file:///android_asset/error.html"); // 加载静态错误页面
                 rootLayout.invalidate(); // 强制刷新布局
             }
         });
@@ -228,13 +202,8 @@ public class MainActivity extends AppCompatActivity {
 
         // 下拉刷新监听
         swipeRefreshLayout.setOnRefreshListener(() -> {
-            if (!isPageLoadFailed) {
-                Log.d("WebView", "Refreshing page: " + url);
-                webView.loadUrl(url); // 仅在页面未失败时重新加载
-            } else {
-                Log.d("WebView", "Refresh ignored due to page load failure");
-                swipeRefreshLayout.setRefreshing(false); // 停止刷新动画
-            }
+            Log.d("WebView", "Refreshing page: " + url);
+            webView.loadUrl(url); // 刷新当前 URL
         });
 
         // 加载网页
