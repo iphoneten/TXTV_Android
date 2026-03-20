@@ -11,9 +11,9 @@
       "type": "SINGLE",
       "filters": [],
       "attributes": [],
-      "versionCode": 2,
-      "versionName": "1.0.0",
-      "outputFile": "CCTV-release-v1.0.0-2.apk"
+      "versionCode": 1,
+      "versionName": "1.0.1",
+      "outputFile": "CCTV-release-v1.0.1-1.apk"
     }
   ],
   "elementType": "File"
