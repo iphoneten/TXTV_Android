@@ -1,10 +1,14 @@
 package com.tv.txtv;
 
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.app.UiModeManager;
 import android.graphics.Color;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
+import android.content.res.Configuration;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
@@ -24,8 +28,12 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 
 public class MainActivity extends AppCompatActivity {
+
+    private static final String ONLINE_URL = "https://moontv-518.pages.dev";
 
     private WebView webView;
     private SwipeRefreshLayout swipeRefreshLayout;
@@ -36,8 +44,9 @@ public class MainActivity extends AppCompatActivity {
     private WebChromeClient.CustomViewCallback customViewCallback;
     private WebChromeClient webChromeClient;
     private String pendingFullscreenOrientation = "unlock";
-//    private String url = "https://moontv-518.pages.dev?tv=1";
-    private final String url = "https://moontv-518.pages.dev/"; // https://moontv-518.pages.dev/  http://192.168.141.10:3000/
+    private String url = ONLINE_URL;
+    private long mainFrameLoadStartMs = 0L;
+//    private final String url = "https://moontv-518.pages.dev/"; // https://moontv-518.pages.dev/  http://192.168.141.10:3000/
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -113,6 +122,8 @@ public class MainActivity extends AppCompatActivity {
         webSettings.setUseWideViewPort(true);
         webSettings.setCacheMode(WebSettings.LOAD_DEFAULT);
         webSettings.setMediaPlaybackRequiresUserGesture(false); // 允许视频自动播放
+        webSettings.setSupportMultipleWindows(false);
+        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
         CookieManager.getInstance().setAcceptCookie(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
@@ -136,10 +147,10 @@ public class MainActivity extends AppCompatActivity {
             webSettings.setAllowUniversalAccessFromFileURLs(true);
         }
 
-        // 伪装浏览器 UA，避免部分网站拦截 Android TV WebView
-        webSettings.setUserAgentString(
-                "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/100.0 Safari/537.36"
-        );
+        // 使用系统最新 UA，只移除 wv 标记，减少被站点识别为低能力 WebView 的概率
+        webSettings.setUserAgentString(buildOptimizedUserAgent(webSettings.getUserAgentString()));
+
+        logCurrentWebViewPackage();
 
         // 设置 WebViewClient 控制 loading 显示隐藏
         webView.setWebViewClient(new WebViewClient() {
@@ -152,24 +163,54 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageStarted(WebView view, String pageUrl, android.graphics.Bitmap favicon) {
                 Log.d("WebView", "Page started loading: " + pageUrl);
-//                url = pageUrl; // 更新当前 URL
-                loadingLayout.setVisibility(View.VISIBLE);
-                progressBar.setVisibility(View.VISIBLE); // 显示 ProgressBar
+                url = pageUrl; // 更新当前 URL
+                mainFrameLoadStartMs = System.currentTimeMillis();
+                showLoading();
                 swipeRefreshLayout.setRefreshing(false);
-                loadingLayout.bringToFront(); // 确保 loadingLayout 在前
+            }
+
+            @Override
+            public void onPageCommitVisible(WebView view, String pageUrl) {
+                url = pageUrl;
+                long elapsed = System.currentTimeMillis() - mainFrameLoadStartMs;
+                Log.d("WebView", "Page commit visible: " + pageUrl + " (" + elapsed + "ms)");
+                // 页面已可见时优先收起 loading，改善体感速度
+                hideLoading();
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request != null && request.isForMainFrame()) {
+                    Log.e("WebView", "Main frame load failed: " + request.getUrl());
+                    hideLoading();
+                }
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if (request != null && request.isForMainFrame()) {
+                    url = request.getUrl().toString();
+                }
+                return false;
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String pageUrl) {
+                url = pageUrl;
+                return false;
             }
 
             @Override
             public void onPageFinished(WebView view, String pageUrl) {
                 Log.d("WebView", "Page finished loading: " + pageUrl);
+                long elapsed = System.currentTimeMillis() - mainFrameLoadStartMs;
+                Log.d("WebView", "Page finished cost: " + elapsed + "ms");
+                url = pageUrl; // 更新当前 URL
                 // 有些 TV WebView 会在页面加载结束后才允许图片下载
                 view.getSettings().setLoadsImagesAutomatically(true);
                 view.getSettings().setBlockNetworkImage(false);
-//                url = pageUrl; // 更新当前 URL
-                loadingLayout.setVisibility(View.GONE);
-                progressBar.setVisibility(View.GONE);
+                hideLoading();
                 swipeRefreshLayout.setRefreshing(false);
-                rootLayout.invalidate(); // 强制刷新布局
             }
         });
 
@@ -247,13 +288,66 @@ public class MainActivity extends AppCompatActivity {
 
         // 下拉刷新监听
         swipeRefreshLayout.setOnRefreshListener(() -> {
+            String currentUrl = webView.getUrl();
+            if (currentUrl != null && !currentUrl.isEmpty()) {
+                url = currentUrl;
+            }
             Log.d("WebView", "Refreshing page: " + url);
-            webView.loadUrl(url); // 刷新当前 URL
+            webView.reload(); // 刷新当前 URL，优先复用缓存与连接
         });
 
         // 加载网页
+        url = buildInitialUrl(ONLINE_URL);
         Log.d("WebView", "Initial page load: " + url);
         webView.loadUrl(url);
+    }
+
+    private String buildInitialUrl(String baseUrl) {
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            return baseUrl;
+        }
+        return isTvDevice() ? baseUrl + "?tv=1" : baseUrl;
+    }
+
+    private boolean isTvDevice() {
+        UiModeManager uiModeManager = (UiModeManager) getSystemService(UI_MODE_SERVICE);
+        if (uiModeManager != null
+                && uiModeManager.getCurrentModeType() == Configuration.UI_MODE_TYPE_TELEVISION) {
+            return true;
+        }
+
+        PackageManager pm = getPackageManager();
+        return pm.hasSystemFeature(PackageManager.FEATURE_TELEVISION)
+                || pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+    }
+
+    private void showLoading() {
+        loadingLayout.setVisibility(View.VISIBLE);
+        progressBar.setVisibility(View.VISIBLE);
+        loadingLayout.bringToFront();
+    }
+
+    private void hideLoading() {
+        loadingLayout.setVisibility(View.GONE);
+        progressBar.setVisibility(View.GONE);
+    }
+
+    private void logCurrentWebViewPackage() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PackageInfo pkg = WebView.getCurrentWebViewPackage();
+            if (pkg != null) {
+                Log.d("WebView", "Current WebView package: " + pkg.packageName + "@" + pkg.versionName);
+            } else {
+                Log.d("WebView", "Current WebView package: null");
+            }
+        }
+    }
+
+    private String buildOptimizedUserAgent(String defaultUa) {
+        if (defaultUa == null || defaultUa.trim().isEmpty()) {
+            return "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36 TXTV/1.0";
+        }
+        return defaultUa.replace("; wv", "") + " TXTV/1.0";
     }
 
     private void applyFullscreenOrientation() {

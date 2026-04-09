@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_ID="com.tv.txtv"
+ACTIVITY=".MainActivity"
+
+if ! command -v adb >/dev/null 2>&1; then
+  echo "adb 未安装或不在 PATH 中"
+  exit 1
+fi
+
+if ! adb get-state >/dev/null 2>&1; then
+  echo "未检测到可用 Android 设备，请先连接设备并开启 adb 调试"
+  exit 1
+fi
+
+./gradlew installDebug
+adb shell am start -n "${APP_ID}/${ACTIVITY}"
+
+echo "应用已启动: ${APP_ID}/${ACTIVITY}"
