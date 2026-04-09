@@ -2,6 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
+def releaseStoreFilePath = project.findProperty("RELEASE_STORE_FILE") ?: System.getenv("RELEASE_STORE_FILE") ?: "${rootDir}/keystore/Untitled"
+def releaseStorePassword = project.findProperty("RELEASE_STORE_PASSWORD") ?: System.getenv("RELEASE_STORE_PASSWORD")
+def releaseKeyAlias = project.findProperty("RELEASE_KEY_ALIAS") ?: System.getenv("RELEASE_KEY_ALIAS")
+def releaseKeyPassword = project.findProperty("RELEASE_KEY_PASSWORD") ?: System.getenv("RELEASE_KEY_PASSWORD")
+def hasReleaseSigning = releaseStorePassword && releaseKeyAlias && releaseKeyPassword && file(releaseStoreFilePath).exists()
+
 android {
     namespace 'com.tv.txtv'
     compileSdk 34
@@ -16,8 +22,26 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(releaseStoreFilePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+                v1SigningEnabled true
+                v2SigningEnabled true
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            } else {
+                logger.lifecycle("Release signing 未配置完整，跳过 release signingConfig。")
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             applicationVariants.all { variant ->

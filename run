@@ -1,20 +1,196 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 APP_ID="com.tv.txtv"
 ACTIVITY=".MainActivity"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GRADLEW="${ROOT_DIR}/gradlew"
+APK_DIR="${ROOT_DIR}/app/build/outputs/apk/debug"
+TARGET_SERIAL=""
+
+CONNECTED_DEVICES=()
+
+collect_connected_devices() {
+  CONNECTED_DEVICES=()
+  local line serial status
+  while IFS= read -r line; do
+    [[ -z "${line}" || "${line}" == "List of devices attached"* ]] && continue
+    serial="$(echo "${line}" | awk '{print $1}')"
+    status="$(echo "${line}" | awk '{print $2}')"
+    if [[ "${status}" == "device" ]]; then
+      CONNECTED_DEVICES+=("${serial}")
+    fi
+  done < <(adb devices)
+}
+
+contains_item() {
+  local needle="$1"
+  shift
+  for item in "$@"; do
+    if [[ "${item}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+choose_from_array() {
+  local prompt="$1"
+  shift
+  local options=("$@")
+  local count="${#options[@]}"
+  local i opt idx
+
+  if [[ "${count}" -eq 1 ]]; then
+    echo "${options[0]}"
+    return 0
+  fi
+
+  echo "${prompt}" >&2
+  i=1
+  for opt in "${options[@]}"; do
+    echo "  ${i}. ${opt}" >&2
+    i=$((i + 1))
+  done
+
+  while true; do
+    read -r -p "请输入序号(1-${count}): " idx < /dev/tty
+    if [[ "${idx}" =~ ^[0-9]+$ ]] && [[ "${idx}" -ge 1 ]] && [[ "${idx}" -le "${count}" ]]; then
+      echo "${options[$((idx - 1))]}"
+      return 0
+    fi
+    echo "输入无效，请重试。" >&2
+  done
+}
+
+resolve_emulator_cmd() {
+  local sdk_dir
+  if command -v emulator >/dev/null 2>&1; then
+    command -v emulator
+    return 0
+  fi
+
+  if [[ -n "${ANDROID_HOME:-}" ]] && [[ -x "${ANDROID_HOME}/emulator/emulator" ]]; then
+    echo "${ANDROID_HOME}/emulator/emulator"
+    return 0
+  fi
+
+  if [[ -f "${ROOT_DIR}/local.properties" ]]; then
+    sdk_dir="$(grep -E '^sdk.dir=' "${ROOT_DIR}/local.properties" | head -n 1 | sed -E 's/^sdk.dir=//; s#\\:#:#g')"
+    if [[ -n "${sdk_dir}" ]] && [[ -x "${sdk_dir}/emulator/emulator" ]]; then
+      echo "${sdk_dir}/emulator/emulator"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+wait_for_boot_completed() {
+  local serial="$1"
+  local timeout_sec=240
+  local elapsed=0
+  local boot_completed
+
+  adb -s "${serial}" wait-for-device >/dev/null 2>&1
+  while [[ "${elapsed}" -lt "${timeout_sec}" ]]; do
+    boot_completed="$(adb -s "${serial}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+    if [[ "${boot_completed}" == "1" ]]; then
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  return 1
+}
 
 if ! command -v adb >/dev/null 2>&1; then
   echo "adb 未安装或不在 PATH 中"
   exit 1
 fi
 
-if ! adb get-state >/dev/null 2>&1; then
-  echo "未检测到可用 Android 设备，请先连接设备并开启 adb 调试"
+collect_connected_devices
+
+if [[ "${#CONNECTED_DEVICES[@]}" -eq 0 ]]; then
+  echo "当前没有在线设备。"
+  echo "adb 设备列表："
+  adb devices -l
+
+  emulator_cmd="$(resolve_emulator_cmd || true)"
+  if [[ -z "${emulator_cmd}" ]]; then
+    echo "未找到 emulator 命令，无法自动启动设备。请先连接真机或配置 Android Emulator。"
+    exit 1
+  fi
+
+  avds=()
+  while IFS= read -r avd; do
+    [[ -n "${avd}" ]] && avds+=("${avd}")
+  done < <("${emulator_cmd}" -list-avds)
+
+  if [[ "${#avds[@]}" -eq 0 ]]; then
+    echo "未找到可用 AVD（模拟器配置）。请先在 Android Studio 创建 AVD。"
+    exit 1
+  fi
+
+  selected_avd="$(choose_from_array "请选择要启动的模拟器：" "${avds[@]}")"
+
+  before_devices=()
+  log_file="/tmp/txtv-emulator-$(date +%Y%m%d-%H%M%S).log"
+  echo "正在启动模拟器: ${selected_avd}"
+  nohup "${emulator_cmd}" -avd "${selected_avd}" >"${log_file}" 2>&1 &
+
+  timeout_sec=300
+  elapsed=0
+  while [[ "${elapsed}" -lt "${timeout_sec}" ]]; do
+    collect_connected_devices
+    for serial in "${CONNECTED_DEVICES[@]}"; do
+      is_new_device=1
+      if [[ "${#before_devices[@]}" -gt 0 ]] && contains_item "${serial}" "${before_devices[@]}"; then
+        is_new_device=0
+      fi
+      if [[ "${serial}" == emulator-* ]] && [[ "${is_new_device}" -eq 1 ]]; then
+        TARGET_SERIAL="${serial}"
+        break
+      fi
+    done
+    if [[ -n "${TARGET_SERIAL}" ]]; then
+      break
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+
+  if [[ -z "${TARGET_SERIAL}" ]]; then
+    echo "等待模拟器设备上线超时。可查看日志: ${log_file}"
+    exit 1
+  fi
+
+  echo "检测到设备 ${TARGET_SERIAL}，等待系统启动完成..."
+  if ! wait_for_boot_completed "${TARGET_SERIAL}"; then
+    echo "设备 ${TARGET_SERIAL} 启动超时。可查看日志: ${log_file}"
+    exit 1
+  fi
+else
+  TARGET_SERIAL="$(choose_from_array "请选择要使用的设备：" "${CONNECTED_DEVICES[@]}")"
+fi
+
+if [[ -z "${TARGET_SERIAL}" ]]; then
+  echo "未能确定目标设备。"
   exit 1
 fi
 
-./gradlew installDebug
-adb shell am start -n "${APP_ID}/${ACTIVITY}"
+echo "使用设备: ${TARGET_SERIAL}"
+echo "开始构建 Debug 包..."
+"${GRADLEW}" assembleDebug
 
-echo "应用已启动: ${APP_ID}/${ACTIVITY}"
+apk_path="$(find "${APK_DIR}" -maxdepth 1 -type f -name "*.apk" | sort | tail -n 1)"
+if [[ -z "${apk_path}" ]]; then
+  echo "未找到 Debug APK: ${APK_DIR}"
+  exit 1
+fi
+
+echo "安装 APK: ${apk_path}"
+adb -s "${TARGET_SERIAL}" install -r "${apk_path}"
+adb -s "${TARGET_SERIAL}" shell am start -n "${APP_ID}/${ACTIVITY}"
+
+echo "应用已启动: ${APP_ID}/${ACTIVITY} (${TARGET_SERIAL})"
